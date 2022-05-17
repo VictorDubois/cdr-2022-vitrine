@@ -1,19 +1,17 @@
-#include <VL53L0X.h>
+
 #include <Wire.h>
 #include <Adafruit_NeoPixel.h>
+#include <Adafruit_VL53L0X.h>
 #ifdef __AVR__
  #include <avr/power.h> // Required for 16 MHz Adafruit Trinket
 #endif
 
-#define USE_IR true
+#define NB_SENSORS 2
 // this constant won't change.  It's the pin number
 // of the sensor's output:
-const int pingPin = 7;
-const int pongPin = 8;
-long nb_cycle_seen = 0;//iterations
+long nb_cycle_seen[NB_SENSORS] ;//iterations
 const long consecutive_seen_threshold = 10;//iterations
 const int distance_seen_threshold = 200;//mm
-VL53L0X sensor;
 
 // Which pin on the Arduino is connected to the NeoPixels?
 #define PIN_LED 6 // On Trinket or Gemma, suggest changing this to 1
@@ -28,6 +26,63 @@ VL53L0X sensor;
 Adafruit_NeoPixel pixels(NUMPIXELS, PIN_LED, NEO_GRB + NEO_KHZ800);
 
 #define DELAYVAL 500 // Time (in milliseconds) to pause between pixels
+
+
+// address we will assign if dual sensor is present
+#define LOX1_ADDRESS 0x30
+#define LOX2_ADDRESS 0x31
+
+
+// set the pins to shutdown
+#define SHT_LOX1 7
+#define SHT_LOX2 6
+
+// objects for the vl53l0x
+Adafruit_VL53L0X lox[NB_SENSORS];
+
+// this holds the measurement
+
+
+/*
+    Reset all sensors by setting all of their XSHUT pins low for delay(10), then set all XSHUT high to bring out of reset
+    Keep sensor #1 awake by keeping XSHUT pin high
+    Put all other sensors into shutdown by pulling XSHUT pins low
+    Initialize sensor #1 with lox.begin(new_i2c_address) Pick any number but 0x29 and it must be under 0x7F. Going with 0x30 to 0x3F is probably OK.
+    Keep sensor #1 awake, and now bring sensor #2 out of reset by setting its XSHUT pin high.
+    Initialize sensor #2 with lox.begin(new_i2c_address) Pick any number but 0x29 and whatever you set the first sensor to
+ */
+void setID() {
+  // all reset
+  digitalWrite(SHT_LOX1, LOW);    
+  digitalWrite(SHT_LOX2, LOW);
+  delay(10);
+  // all unreset
+  digitalWrite(SHT_LOX1, HIGH);
+  digitalWrite(SHT_LOX2, HIGH);
+  delay(10);
+
+  // activating LOX1 and reseting LOX2
+  digitalWrite(SHT_LOX1, HIGH);
+  digitalWrite(SHT_LOX2, LOW);
+
+  // initing LOX1
+  if(!lox[0].begin(LOX1_ADDRESS)) {
+    Serial.println(F("Failed to boot first VL53L0X"));
+    while(1);
+  }
+  delay(10);
+
+  // activating LOX2
+  digitalWrite(SHT_LOX2, HIGH);
+  delay(10);
+
+  //initing LOX2
+  if(!lox[1].begin(LOX2_ADDRESS)) {
+    Serial.println(F("Failed to boot second VL53L0X"));
+    while(1);
+  }
+}
+
 
 void vitrine_on() {
   pixels.clear(); // Set all pixel colors to 'off'
@@ -47,6 +102,11 @@ void vitrine_on() {
 }
 
 void setup() {
+  for(int i = 0; i< NB_SENSORS; i++) {
+    nb_cycle_seen[i] = 0;
+
+    lox[i] = Adafruit_VL53L0X();
+  }
   // initialize serial communication:
   Serial.begin(9600);
   Wire.begin();
@@ -60,72 +120,49 @@ void setup() {
   pixels.begin(); // INITIALIZE NeoPixel strip object (REQUIRED)
   pixels.clear(); // Set all pixel colors to 'off'
 
-#ifdef USE_IR
-  sensor.setTimeout(500);
-  if (!sensor.init())
-  {
-    Serial.println("Failed to detect and initialize sensor!");
-    while (1) {}
-  }
-  // Start continuous back-to-back mode (take readings as
-  // fast as possible).  To use continuous timed mode
-  // instead, provide a desired inter-measurement period in
-  // ms (e.g. sensor.startContinuous(100)).
-  sensor.startContinuous(100);
-#endif
+  pinMode(SHT_LOX1, OUTPUT);
+  pinMode(SHT_LOX2, OUTPUT);
+
+  Serial.println(F("Shutdown pins inited..."));
+
+  digitalWrite(SHT_LOX1, LOW);
+  digitalWrite(SHT_LOX2, LOW);
+
+  Serial.println(F("Both in reset mode...(pins are low)"));
+  
+  
+  Serial.println(F("Starting..."));
+  setID();
 }
 
 void loop()
 {
   // establish variables for duration of the ping, 
   // and the distance result in inches and centimeters:
-  long duration, distance_mm;
-
-#ifdef USE_ULTRASOUND
-  // The PING))) is triggered by a HIGH pulse of 2 or more microseconds.
-  // Give a short LOW pulse beforehand to ensure a clean HIGH pulse:
-  pinMode(pingPin, OUTPUT);
-  digitalWrite(pingPin, LOW);
-  delayMicroseconds(2);
-  digitalWrite(pingPin, HIGH);
-  delayMicroseconds(5);
-  digitalWrite(pingPin, LOW);
-
-  // The same pin is used to read the signal from the PING))): a HIGH
-  // pulse whose duration is the time (in microseconds) from the sending
-  // of the ping to the reception of its echo off of an object.
-  pinMode(pongPin, INPUT);
-  duration = pulseIn(pongPin, HIGH);
-
-  // convert the time into a distance
-  distance_mm = microsecondsToCentimeters(duration) * 10; 
-#endif
-#ifdef USE_IR
-  distance_mm = sensor.readRangeContinuousMillimeters();
-  if (sensor.timeoutOccurred()) { Serial.print(" TIMEOUT"); }
-#endif
-  Serial.print(distance_mm);
-  Serial.print("mm");
-  Serial.println();
+  long distance_mm;
   
   delay(100);
 
-  if (distance_mm < distance_seen_threshold) {
-    nb_cycle_seen++;
-  }
-  else {
-    nb_cycle_seen = 0;
-  }
-  if (nb_cycle_seen > consecutive_seen_threshold)
-  {
-   vitrine_on(); 
-  }
-}
+  VL53L0X_RangingMeasurementData_t measure[NB_SENSORS];
+    
+  for (int i = 0; i < NB_SENSORS; i++){
+    lox[i].rangingTest(&measure[i], false); // pass in 'true' to get debug data printout!
+    if (measure[i].RangeStatus == 4) {
+        // Out of range
+        nb_cycle_seen[i] = 0;
+        continue;
+    }
+    distance_mm = measure[i].RangeMilliMeter;
 
-long microsecondsToCentimeters(long microseconds)
-{
-  // The speed of sound is 340 m/s or 29 microseconds per centimeter.
-  // The ping travels out and back, so to find the distance of the
-  // object we take half of the distance travelled.
-  return microseconds / 29 / 2;
+    if (distance_mm < distance_seen_threshold) {
+      nb_cycle_seen[i]++;
+    }
+    else {
+      nb_cycle_seen[i] = 0;
+    }
+    if (nb_cycle_seen[i] > consecutive_seen_threshold)
+    {
+     vitrine_on(); 
+    }
+  }
 }
